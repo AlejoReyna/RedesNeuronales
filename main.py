@@ -11,13 +11,22 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.preprocess import DataPreprocessor
-from src.train_cnn import CNNModel, determine_task_type
-from src.evaluate import ModelEvaluator
 from src.utils import (
     setup_logging, save_training_curves, set_random_seeds,
     ensure_directory_structure, print_metrics, save_metrics_to_json
 )
 from src.report import generate_pdf_report
+
+# Import TensorFlow-dependent modules only when available
+try:
+    from src.train_cnn import CNNModel, determine_task_type
+    from src.evaluate import ModelEvaluator
+    _tensorflow_available = True
+except ImportError:
+    _tensorflow_available = False
+    CNNModel = None
+    ModelEvaluator = None
+    determine_task_type = None
 
 
 def run_eda():
@@ -90,6 +99,21 @@ def run_training(top_k=None, corr_threshold=None):
     """
     Run model training pipeline.
     """
+    if not _tensorflow_available:
+        print("\n" + "=" * 60)
+        print(" " * 15 + "TENSORFLOW NOT AVAILABLE")
+        print("=" * 60 + "\n")
+        print("TensorFlow is not installed or not compatible with your Python version.")
+        print("Please install TensorFlow or use a compatible Python version (3.8-3.11).")
+        print("\nTo install TensorFlow:")
+        print("  pip install tensorflow")
+        print("\nOr use Python 3.11:")
+        print("  python3.11 -m venv venv")
+        print("  source venv/bin/activate")
+        print("  pip install -r requirements.txt")
+        print("=" * 60 + "\n")
+        return
+    
     print("\n" + "=" * 60)
     print(" " * 15 + "RUNNING MODEL TRAINING")
     print("=" * 60 + "\n")
@@ -159,6 +183,21 @@ def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None):
     """
     Run model evaluation pipeline.
     """
+    if not _tensorflow_available:
+        print("\n" + "=" * 60)
+        print(" " * 15 + "TENSORFLOW NOT AVAILABLE")
+        print("=" * 60 + "\n")
+        print("TensorFlow is not installed or not compatible with your Python version.")
+        print("Please install TensorFlow or use a compatible Python version (3.8-3.11).")
+        print("\nTo install TensorFlow:")
+        print("  pip install tensorflow")
+        print("\nOr use Python 3.11:")
+        print("  python3.11 -m venv venv")
+        print("  source venv/bin/activate")
+        print("  pip install -r requirements.txt")
+        print("=" * 60 + "\n")
+        return
+    
     print("\n" + "=" * 60)
     print(" " * 15 + "RUNNING MODEL EVALUATION")
     print("=" * 60 + "\n")
