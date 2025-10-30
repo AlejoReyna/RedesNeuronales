@@ -4,6 +4,7 @@ Evaluates trained CNN model and generates performance metrics and visualizations
 """
 
 import os
+import json
 import logging
 import numpy as np
 import joblib
@@ -29,7 +30,7 @@ class ModelEvaluator:
     Handles model evaluation and metrics generation.
     """
     
-    def __init__(self, model_path='models/cnn_model.h5', scaler_path='models/scaler.pkl', baseline_path=None):
+    def __init__(self, model_path='models/cnn_model.h5', scaler_path='models/scaler.pkl', target_scaler_path='models/target_scaler.pkl', baseline_path=None):
         """
         Initialize the evaluator.
         
@@ -41,21 +42,66 @@ class ModelEvaluator:
         self.scaler_path = scaler_path
         self.model = None
         self.scaler = None
+        self.target_scaler_path = target_scaler_path
+        self.target_scaler = None
         self.task_type = None
         self.baseline_path = baseline_path
         self.baseline_model = None
+        self.target_transform = None
         
     def load_model_and_scaler(self):
         """
         Load the trained model and scaler.
         """
         logger.info(f"Loading model from {self.model_path}")
-        self.model = keras.models.load_model(self.model_path)
+        try:
+            # Try loading with custom objects for metrics compatibility
+            self.model = keras.models.load_model(
+                self.model_path,
+                custom_objects={
+                    'mse': keras.losses.MeanSquaredError(),
+                    'mae': keras.metrics.MeanAbsoluteError(),
+                    'rmse': keras.metrics.RootMeanSquaredError(),
+                },
+                compile=False
+            )
+            # Recompile if needed
+            if not self.model.built:
+                self.model.compile(
+                    optimizer=keras.optimizers.Adam(learning_rate=0.001),
+                    loss='mse',
+                    metrics=['mae', 'mse']
+                )
+        except Exception as e:
+            logger.warning(f"Error loading model with custom objects: {e}")
+            # Fallback: try loading without custom objects
+            try:
+                self.model = keras.models.load_model(self.model_path, compile=False)
+                self.model.compile(
+                    optimizer=keras.optimizers.Adam(learning_rate=0.001),
+                    loss='mse',
+                    metrics=['mae', 'mse']
+                )
+            except Exception as e2:
+                logger.error(f"Failed to load model: {e2}")
+                raise
         
         logger.info(f"Loading scaler from {self.scaler_path}")
         self.scaler = joblib.load(self.scaler_path)
         
         logger.info("Model and scaler loaded successfully")
+
+        if self.target_scaler_path and os.path.exists(self.target_scaler_path):
+            try:
+                self.target_scaler = joblib.load(self.target_scaler_path)
+                logger.info(f"Target scaler loaded from {self.target_scaler_path}")
+                meta_path = self.target_scaler_path.replace('.pkl', '_meta.json')
+                if os.path.exists(meta_path):
+                    with open(meta_path, 'r') as meta_file:
+                        meta = json.load(meta_file)
+                        self.target_transform = meta.get('target_transform')
+            except Exception as exc:
+                logger.warning(f"Could not load target scaler: {exc}")
 
         # Try to load baseline model if provided
         if self.baseline_path and os.path.exists(self.baseline_path):
@@ -87,7 +133,7 @@ class ModelEvaluator:
         logger.info(f"Task type: {self.task_type}")
         return self.task_type
     
-    def predict(self, X):
+    def predict(self, X, already_scaled=False):
         """
         Make predictions on input data.
         
@@ -98,7 +144,19 @@ class ModelEvaluator:
             np.ndarray: Predictions
         """
         logger.info(f"Making predictions on {len(X)} samples")
+        if not already_scaled:
+            if self.scaler is None:
+                raise ValueError("Scaler not loaded. Please call load_model_and_scaler() first.")
+            X = self.scaler.transform(X)
         predictions = self.model.predict(X, verbose=0)
+        if self.task_type == 'regression':
+            if self.target_scaler is not None:
+                predictions = self.target_scaler.inverse_transform(predictions)
+            if self.target_transform == 'log1p':
+                predictions = np.expm1(predictions)
+        predictions = predictions.reshape(-1, 1) if predictions.ndim == 1 else predictions
+        if predictions.shape[1] == 1:
+            predictions = predictions.flatten()
         return predictions
     
     def calculate_classification_metrics(self, y_true, y_pred, threshold=0.5):
@@ -155,13 +213,14 @@ class ModelEvaluator:
         
         return metrics
     
-    def evaluate(self, X_test, y_test):
+    def evaluate(self, X_test, y_test, X_test_scaled=None):
         """
         Evaluate the model on test data.
         
         Args:
-            X_test (np.ndarray): Test features
+            X_test (np.ndarray): Test features (can be unscaled if scaler is available)
             y_test (np.ndarray): Test targets
+            X_test_scaled (np.ndarray, optional): Pre-scaled test features. If None, will scale using self.scaler
             
         Returns:
             dict: Evaluation metrics
@@ -173,8 +232,16 @@ class ModelEvaluator:
         # Detect task type
         self.detect_task_type(y_test)
         
-        # Make predictions
-        y_pred = self.predict(X_test)
+        # Scale features if not already scaled
+        if X_test_scaled is None:
+            if self.scaler is None:
+                raise ValueError("Scaler not loaded. Please call load_model_and_scaler() first.")
+            X_test_scaled = self.scaler.transform(X_test)
+        else:
+            X_test_scaled = X_test_scaled
+        
+        # Make predictions (already scaled features)
+        y_pred = self.predict(X_test_scaled, already_scaled=True)
         
         # Calculate metrics based on task type
         if self.task_type == 'classification':
@@ -202,7 +269,6 @@ class ModelEvaluator:
                     base_metrics = self.calculate_classification_metrics(y_test, baseline_pred)
                 else:
                     base_metrics = self.calculate_regression_metrics(y_test, baseline_pred)
-                # Prefix baseline metrics
                 for k, v in base_metrics.items():
                     metrics[f"baseline_{k}"] = v
             except Exception as e:

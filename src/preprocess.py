@@ -20,7 +20,7 @@ class DataPreprocessor:
     scaling, and splitting data for the CNN model.
     """
     
-    def __init__(self, data_path='data/Variables_Horno.csv', train_ratio=0.7, top_k=None, corr_threshold=None):
+    def __init__(self, data_path='data/Variables_Horno_REAL.csv', train_ratio=0.7, top_k=None, corr_threshold=None, target_clip_quantile=None):
         """
         Initialize the preprocessor.
         
@@ -35,6 +35,8 @@ class DataPreprocessor:
         self.target_name = None
         self.top_k = top_k
         self.corr_threshold = corr_threshold
+        self.target_clip_quantile = target_clip_quantile
+        self.target_clip_threshold = None
         
     def load_data(self):
         """
@@ -49,6 +51,10 @@ class DataPreprocessor:
             raise FileNotFoundError(f"Data file not found: {self.data_path}")
         
         df = pd.read_csv(self.data_path)
+        
+        # Clean column names (remove leading/trailing spaces)
+        df.columns = df.columns.str.strip()
+        
         logger.info(f"Data loaded successfully. Shape: {df.shape}")
         logger.info(f"Columns: {df.columns.tolist()}")
         
@@ -78,7 +84,7 @@ class DataPreprocessor:
             for col in numeric_cols:
                 if df[col].isnull().sum() > 0:
                     median_value = df[col].median()
-                    df[col].fillna(median_value, inplace=True)
+                    df.loc[:, col] = df[col].fillna(median_value)
                     logger.info(f"Imputed {col} with median: {median_value}")
             
             # Impute categorical columns with mode
@@ -86,7 +92,7 @@ class DataPreprocessor:
             for col in categorical_cols:
                 if df[col].isnull().sum() > 0:
                     mode_value = df[col].mode()[0]
-                    df[col].fillna(mode_value, inplace=True)
+                    df.loc[:, col] = df[col].fillna(mode_value)
                     logger.info(f"Imputed {col} with mode: {mode_value}")
         else:
             logger.info("No missing values found")
@@ -101,6 +107,7 @@ class DataPreprocessor:
         logger.info(f"Data cleaning completed. Shape change: {initial_shape} -> {df.shape}")
         
         return df
+
     
     def prepare_features_target(self, df):
         """
@@ -160,6 +167,23 @@ class DataPreprocessor:
         
         return X_train, X_test, y_train, y_test
 
+    def clip_target(self, y_train, y_test):
+        quantile = float(self.target_clip_quantile)
+        if quantile <= 0 or quantile >= 1:
+            logger.warning("target_clip_quantile should be between 0 and 1. Skipping clipping.")
+            return y_train, y_test
+
+        threshold = np.quantile(y_train, quantile)
+        y_train_clipped = np.minimum(y_train, threshold)
+        y_test_clipped = np.minimum(y_test, threshold)
+        self.target_clip_threshold = threshold
+
+        logger.info(f"Clipped target at quantile {quantile:.3f} (threshold: {threshold:.4f})")
+        clipped_count = np.sum(y_train != y_train_clipped)
+        logger.info(f"Training samples clipped: {clipped_count}")
+
+        return y_train_clipped, y_test_clipped
+
     def select_features_by_correlation(self, X_train, y_train, X_test):
         """
         Optionally select features based on correlation with the target on training data.
@@ -208,7 +232,7 @@ class DataPreprocessor:
         logger.info(f"Feature selection shapes: train {X_train_sel.shape}, test {X_test_sel.shape}")
         return X_train_sel, X_test_sel
     
-    def scale_features(self, X_train, X_test):
+    def scale_features(self, X_train, X_test, fit=True, scaler_path='models/scaler.pkl'):
         """
         Scale features using StandardScaler.
         
@@ -219,10 +243,16 @@ class DataPreprocessor:
         Returns:
             tuple: (X_train_scaled, X_test_scaled)
         """
-        logger.info("Scaling features using StandardScaler")
-        
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
+        if fit:
+            logger.info("Fitting StandardScaler on training data")
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            X_test_scaled = self.scaler.transform(X_test)
+        else:
+            if self.scaler is None or not hasattr(self.scaler, 'mean_'):
+                logger.info("Loading existing scaler for transformation")
+                self.load_scaler(scaler_path)
+            X_train_scaled = self.scaler.transform(X_train)
+            X_test_scaled = self.scaler.transform(X_test)
         
         logger.info("Feature scaling completed")
         
@@ -249,7 +279,7 @@ class DataPreprocessor:
         self.scaler = joblib.load(scaler_path)
         logger.info(f"Scaler loaded from {scaler_path}")
     
-    def preprocess(self):
+    def preprocess(self, fit_scaler=True):
         """
         Execute the full preprocessing pipeline.
         
@@ -272,14 +302,17 @@ class DataPreprocessor:
         # Split data (before feature selection to avoid leakage)
         X_train, X_test, y_train, y_test = self.split_data(X, y)
 
+        if self.target_clip_quantile is not None:
+            y_train, y_test = self.clip_target(y_train, y_test)
+
         # Optional feature selection on training set statistics
         X_train, X_test = self.select_features_by_correlation(X_train, y_train, X_test)
-
-        # Scale features after selection
-        X_train, X_test = self.scale_features(X_train, X_test)
         
-        # Save scaler
-        self.save_scaler()
+        scaler_path = 'models/scaler.pkl'
+        X_train, X_test = self.scale_features(X_train, X_test, fit=fit_scaler, scaler_path=scaler_path)
+        
+        if fit_scaler:
+            self.save_scaler(scaler_path)
         
         logger.info("=" * 60)
         logger.info("PREPROCESSING COMPLETED SUCCESSFULLY")

@@ -5,11 +5,15 @@ Builds and trains a 1D Convolutional Neural Network for POWER ON prediction.
 
 import os
 import logging
+import json
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from sklearn.preprocessing import StandardScaler
+import joblib
+
 from src.preprocess import DataPreprocessor
 from src.utils import setup_logging, save_training_curves, set_random_seeds
 
@@ -34,6 +38,8 @@ class CNNModel:
         self.task_type = task_type
         self.model = None
         self.history = None
+        self.target_scaler = None
+        self.target_transform = None
         
     def build_model(self):
         """
@@ -42,43 +48,43 @@ class CNNModel:
         Returns:
             keras.Model: Compiled CNN model
         """
-        logger.info("Building CNN model architecture")
+        logger.info("Building model architecture")
         logger.info(f"Input shape: {self.input_shape}")
         logger.info(f"Task type: {self.task_type}")
-        
-        model = models.Sequential([
-            # Reshape for Conv1D: (batch_size, timesteps, features)
-            layers.Reshape((self.input_shape[0], 1), input_shape=self.input_shape),
-            
-            # First convolutional block
-            layers.Conv1D(32, kernel_size=3, activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.MaxPooling1D(pool_size=2),
-            layers.Dropout(0.2),
-            
-            # Second convolutional block
-            layers.Conv1D(64, kernel_size=3, activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.MaxPooling1D(pool_size=2),
-            layers.Dropout(0.2),
-            
-            # Third convolutional block
-            layers.Conv1D(128, kernel_size=3, activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.Flatten(),
-            
-            # Dense layers
-            layers.Dense(128, activation='relu'),
-            layers.BatchNormalization(),
-            layers.Dropout(0.3),
-            
-            layers.Dense(64, activation='relu'),
-            layers.Dropout(0.2),
-            
-            # Output layer
-            layers.Dense(1, activation='sigmoid' if self.task_type == 'classification' else 'linear')
-        ])
-        
+
+        if self.task_type == 'classification':
+            model = models.Sequential([
+                layers.Reshape((self.input_shape[0], 1), input_shape=self.input_shape),
+                layers.Conv1D(32, kernel_size=3, activation='relu', padding='same'),
+                layers.BatchNormalization(),
+                layers.MaxPooling1D(pool_size=2),
+                layers.Dropout(0.2),
+                layers.Conv1D(64, kernel_size=3, activation='relu', padding='same'),
+                layers.BatchNormalization(),
+                layers.MaxPooling1D(pool_size=2),
+                layers.Dropout(0.2),
+                layers.Conv1D(128, kernel_size=3, activation='relu', padding='same'),
+                layers.BatchNormalization(),
+                layers.Flatten(),
+                layers.Dense(128, activation='relu'),
+                layers.BatchNormalization(),
+                layers.Dropout(0.3),
+                layers.Dense(64, activation='relu'),
+                layers.Dropout(0.2),
+                layers.Dense(1, activation='sigmoid')
+            ])
+        else:
+            model = models.Sequential([
+                layers.Input(shape=self.input_shape),
+                layers.Dense(256, activation='relu'),
+                layers.Dropout(0.3),
+                layers.Dense(128, activation='relu'),
+                layers.Dropout(0.2),
+                layers.Dense(64, activation='relu'),
+                layers.Dropout(0.2),
+                layers.Dense(1, activation='linear')
+            ])
+
         self.model = model
         logger.info("Model architecture built successfully")
         
@@ -162,7 +168,13 @@ class CNNModel:
         logger.info(f"Validation split: {validation_split}")
         
         callbacks = self.get_callbacks()
-        
+
+        if self.task_type == 'regression':
+            self.target_transform = 'log1p'
+            transformed_target = np.log1p(y_train)
+            self.target_scaler = StandardScaler()
+            y_train = self.target_scaler.fit_transform(transformed_target.reshape(-1, 1)).flatten()
+
         self.history = self.model.fit(
             X_train, y_train,
             epochs=epochs,
@@ -176,7 +188,35 @@ class CNNModel:
         logger.info("TRAINING COMPLETED")
         logger.info("=" * 60)
         
+        # Save training history to JSON
+        self.save_history()
+        
         return self.history
+    
+    def save_history(self, history_path='models/training_history.json'):
+        """
+        Save training history to JSON file.
+        
+        Args:
+            history_path (str): Path to save the history
+        """
+        import json
+        
+        if self.history is None:
+            logger.warning("No training history available to save")
+            return
+        
+        os.makedirs(os.path.dirname(history_path), exist_ok=True)
+        
+        # Convert history to JSON-serializable format
+        history_dict = {}
+        for key, values in self.history.history.items():
+            history_dict[key] = [float(v) for v in values]
+        
+        with open(history_path, 'w') as f:
+            json.dump(history_dict, f, indent=2)
+        
+        logger.info(f"Training history saved to {history_path}")
     
     def save_model(self, model_path='models/cnn_model.h5'):
         """
@@ -188,6 +228,18 @@ class CNNModel:
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
         self.model.save(model_path)
         logger.info(f"Model saved to {model_path}")
+
+    def save_target_scaler(self, scaler_path='models/target_scaler.pkl'):
+        """Save target scaler if available."""
+        if self.target_scaler is None:
+            logger.info("No target scaler to save")
+            return
+        os.makedirs(os.path.dirname(scaler_path), exist_ok=True)
+        joblib.dump(self.target_scaler, scaler_path)
+        meta_path = scaler_path.replace('.pkl', '_meta.json')
+        with open(meta_path, 'w') as meta_file:
+            json.dump({'target_transform': self.target_transform}, meta_file, indent=2)
+        logger.info(f"Target scaler saved to {scaler_path}")
     
     def load_model(self, model_path='models/cnn_model.h5'):
         """

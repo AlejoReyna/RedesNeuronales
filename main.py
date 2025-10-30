@@ -53,7 +53,7 @@ def run_eda():
     print("=" * 60 + "\n")
 
 
-def run_preprocessing(top_k=None, corr_threshold=None):
+def run_preprocessing(top_k=None, corr_threshold=None, data_path='data/Variables_Horno_REAL.csv', target_clip_quantile=None):
     """
     Run data preprocessing pipeline.
     """
@@ -72,10 +72,11 @@ def run_preprocessing(top_k=None, corr_threshold=None):
     
     # Run preprocessing
     preprocessor = DataPreprocessor(
-        data_path='data/Variables_Horno.csv',
+        data_path=data_path,
         train_ratio=0.7,
         top_k=top_k,
-        corr_threshold=corr_threshold
+        corr_threshold=corr_threshold,
+        target_clip_quantile=target_clip_quantile
     )
     
     X_train, X_test, y_train, y_test = preprocessor.preprocess()
@@ -95,7 +96,7 @@ def run_preprocessing(top_k=None, corr_threshold=None):
     return X_train, X_test, y_train, y_test, preprocessor
 
 
-def run_training(top_k=None, corr_threshold=None):
+def run_training(top_k=None, corr_threshold=None, data_path='data/Variables_Horno_REAL.csv', target_clip_quantile=None):
     """
     Run model training pipeline.
     """
@@ -128,14 +129,14 @@ def run_training(top_k=None, corr_threshold=None):
     ensure_directory_structure()
     
     # Check if data file exists
-    if not os.path.exists('data/Variables_Horno.csv'):
-        print("ERROR: Data file 'data/Variables_Horno.csv' not found!")
-        print("Please place the Variables_Horno.csv file in the 'data/' directory.")
+    if not os.path.exists(data_path):
+        print(f"ERROR: Data file '{data_path}' not found!")
+        print("Please place the dataset file in the 'data/' directory.")
         return
     
     # Preprocess data
     print("Step 1/3: Preprocessing data...")
-    preprocessor = DataPreprocessor(data_path='data/Variables_Horno.csv', train_ratio=0.7, top_k=top_k, corr_threshold=corr_threshold)
+    preprocessor = DataPreprocessor(data_path=data_path, train_ratio=0.7, top_k=top_k, corr_threshold=corr_threshold, target_clip_quantile=target_clip_quantile)
     X_train, X_test, y_train, y_test = preprocessor.preprocess()
     
     # Determine task type
@@ -162,6 +163,8 @@ def run_training(top_k=None, corr_threshold=None):
     
     # Save model
     cnn_model.save_model('models/cnn_model.h5')
+    if task_type == 'regression':
+        cnn_model.save_target_scaler('models/target_scaler.pkl')
     
     # Save training curves
     save_training_curves(history, 'results/training_curves.png')
@@ -179,7 +182,7 @@ def run_training(top_k=None, corr_threshold=None):
     print("=" * 60 + "\n")
 
 
-def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None):
+def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None, data_path='data/Variables_Horno_REAL.csv', target_clip_quantile=None):
     """
     Run model evaluation pipeline.
     """
@@ -202,13 +205,7 @@ def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None):
     print(" " * 15 + "RUNNING MODEL EVALUATION")
     print("=" * 60 + "\n")
     # Generate PDF report
-    report_path = generate_pdf_report(
-        metrics_path='results/metrics.json',
-        training_curves_path='results/training_curves.png',
-        confusion_matrix_path='results/confusion_matrix.png',
-        output_path='results/report.pdf'
-    )
-    print(f"Report generated: {report_path}")
+    report_path = None
     
     # Set random seeds
     set_random_seeds(42)
@@ -227,28 +224,29 @@ def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None):
         return
     
     # Check if data file exists
-    if not os.path.exists('data/Variables_Horno.csv'):
-        print("ERROR: Data file 'data/Variables_Horno.csv' not found!")
-        print("Please place the Variables_Horno.csv file in the 'data/' directory.")
+    if not os.path.exists(data_path):
+        print(f"ERROR: Data file '{data_path}' not found!")
+        print("Please place the dataset file in the 'data/' directory.")
         return
     
     # Load and preprocess data
     print("Step 1/3: Loading and preprocessing data...")
-    preprocessor = DataPreprocessor(data_path='data/Variables_Horno.csv', train_ratio=0.7, top_k=top_k, corr_threshold=corr_threshold)
-    X_train, X_test, y_train, y_test = preprocessor.preprocess()
+    preprocessor = DataPreprocessor(data_path=data_path, train_ratio=0.7, top_k=top_k, corr_threshold=corr_threshold, target_clip_quantile=target_clip_quantile)
+    X_train, X_test, y_train, y_test = preprocessor.preprocess(fit_scaler=False)
     
     # Initialize evaluator
     print("\nStep 2/3: Loading trained model...")
     evaluator = ModelEvaluator(
         model_path='models/cnn_model.h5',
         scaler_path='models/scaler.pkl',
+        target_scaler_path='models/target_scaler.pkl',
         baseline_path=baseline_path
     )
     evaluator.load_model_and_scaler()
     
     # Evaluate model
     print("\nStep 3/3: Evaluating model on test set...")
-    metrics = evaluator.evaluate(X_test, y_test)
+    metrics = evaluator.evaluate(X_test, y_test, X_test_scaled=X_test)
     
     # Print metrics
     print_metrics(metrics)
@@ -257,8 +255,19 @@ def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None):
     save_metrics_to_json(metrics, 'results/metrics.json')
     
     # Generate detailed report
-    y_pred = evaluator.predict(X_test)
-    evaluator.generate_detailed_report(y_test, y_pred)
+    if evaluator.task_type == 'classification':
+        y_pred = evaluator.predict(X_test, already_scaled=True)
+        evaluator.generate_detailed_report(y_test, y_pred)
+    else:
+        print("Regression task detected: skipping classification report.")
+
+    report_path = generate_pdf_report(
+        metrics_path='results/metrics.json',
+        training_curves_path='results/training_curves.png',
+        confusion_matrix_path='results/confusion_matrix.png',
+        output_path='results/report.pdf'
+    )
+    print(f"Report generated: {report_path}")
     
     print("\n" + "=" * 60)
     print("EVALUATION COMPLETED SUCCESSFULLY")
@@ -268,6 +277,9 @@ def run_evaluation(baseline_path=None, top_k=None, corr_threshold=None):
     print(f"  - Training curves: results/training_curves.png")
     if evaluator.task_type == 'classification':
         print(f"  - Confusion matrix: results/confusion_matrix.png")
+    else:
+        print("  - Regression task: no confusion matrix produced")
+    print(f"  - PDF report: {report_path}")
     print("=" * 60 + "\n")
 
 
@@ -307,6 +319,10 @@ Examples:
                         help='Path to baseline model pickle to compare during evaluation')
     parser.add_argument('--report', action='store_true',
                         help='Generate PDF report from existing results (results/metrics.json, images)')
+    parser.add_argument('--data_path', type=str, default='data/Variables_Horno_REAL.csv',
+                        help='Path to the dataset CSV file')
+    parser.add_argument('--clip_target_quantile', type=float, default=None,
+                        help='If set, clip target values above this quantile (e.g., 0.99)')
     
     args = parser.parse_args()
     
@@ -320,13 +336,13 @@ Examples:
         run_eda()
     
     if args.preprocess:
-        run_preprocessing(top_k=args.top_k, corr_threshold=args.corr_threshold)
+        run_preprocessing(top_k=args.top_k, corr_threshold=args.corr_threshold, data_path=args.data_path, target_clip_quantile=args.clip_target_quantile)
     
     if args.train or args.all:
-        run_training(top_k=args.top_k, corr_threshold=args.corr_threshold)
+        run_training(top_k=args.top_k, corr_threshold=args.corr_threshold, data_path=args.data_path, target_clip_quantile=args.clip_target_quantile)
     
     if args.evaluate or args.all:
-        run_evaluation(baseline_path=args.baseline, top_k=args.top_k, corr_threshold=args.corr_threshold)
+        run_evaluation(baseline_path=args.baseline, top_k=args.top_k, corr_threshold=args.corr_threshold, data_path=args.data_path, target_clip_quantile=args.clip_target_quantile)
 
     if args.report:
         path = generate_pdf_report(
